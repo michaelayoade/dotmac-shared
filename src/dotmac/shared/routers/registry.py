@@ -1217,6 +1217,13 @@ def register_routers_for_scope(
     registered = 0
     failed = 0
     seen: set[tuple[str, str, str]] = set()
+    # Global dedupe across calls to prevent repeated registrations when apps
+    # register the same scope multiple times in one process.
+    global _GLOBAL_ROUTER_SEEN
+    try:
+        _GLOBAL_ROUTER_SEEN
+    except NameError:  # define lazily
+        _GLOBAL_ROUTER_SEEN = set()
 
     def _combine_prefixes(*parts: str) -> str:
         combined = ""
@@ -1245,7 +1252,7 @@ def register_routers_for_scope(
 
             # Skip duplicate registrations of the same router+prefix in this call
             dedupe_key = (entry.module_path, entry.router_name, full_prefix)
-            if dedupe_key in seen:
+            if dedupe_key in seen or dedupe_key in _GLOBAL_ROUTER_SEEN:
                 logger.warning(
                     "router.duplicate_skipped",
                     router=entry.router_name,
@@ -1254,6 +1261,7 @@ def register_routers_for_scope(
                 )
                 continue
             seen.add(dedupe_key)
+            _GLOBAL_ROUTER_SEEN.add(dedupe_key)
 
             # Register the router
             app.include_router(
