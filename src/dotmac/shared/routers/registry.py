@@ -69,7 +69,7 @@ class RouterEntry:
     prefix: str
     tags: tuple[str, ...]
     scope: ServiceScope
-    base_prefix: str = ""
+    base_prefix: str | None = None  # None = use default_base_prefix, "" = no base prefix
     requires_auth: bool = True
     description: str = ""
     deprecated: bool = False
@@ -292,9 +292,10 @@ ROUTER_REGISTRY: tuple[RouterEntry, ...] = (
     RouterEntry(
         module_path="dotmac.platform.deployment.router",
         router_name="router",
-        prefix="",  # /deployments at mount root
+        prefix="/deployments",  # /deployments/* (templates, provision, instances)
         tags=("Deployment Orchestration",),
         scope=ServiceScope.CONTROLPLANE,
+        base_prefix="",  # No admin prefix - use /deployments directly
         requires_auth=True,
         description="Multi-tenant deployment provisioning and lifecycle management",
     ),
@@ -378,6 +379,29 @@ ROUTER_REGISTRY: tuple[RouterEntry, ...] = (
         scope=ServiceScope.CONTROLPLANE,
         requires_auth=True,
         description="Vault/OpenBao secrets management",
+    ),
+    RouterEntry(
+        module_path="dotmac.platform.onboarding.router",
+        router_name="router",
+        prefix="",  # /onboarding at mount root
+        tags=("Tenant Onboarding",),
+        scope=ServiceScope.CONTROLPLANE,
+        requires_auth=False,  # Router handles auth internally - self-service is public
+        description="Tenant onboarding with license, credentials, and docker-compose generation",
+    ),
+    # =========================================================================
+    # SERVICE API ROUTERS - ISP-to-Platform Communication
+    # These endpoints use service-to-service auth, not user auth
+    # Mounted at /api/platform/v1/service-api/*
+    # =========================================================================
+    RouterEntry(
+        module_path="dotmac.platform.service_api",
+        router_name="router",
+        prefix="/service-api",
+        tags=("Service API",),
+        scope=ServiceScope.CONTROLPLANE,
+        requires_auth=False,  # Uses service-to-service auth via require_isp_service
+        description="ISP-to-Platform service API (license validation, config sync, metrics)",
     ),
     # =========================================================================
     # ISP ROUTERS - ISP Operations
@@ -585,6 +609,15 @@ ROUTER_REGISTRY: tuple[RouterEntry, ...] = (
         scope=ServiceScope.ISP,
         requires_auth=True,
         description="RADIUS analytics and bandwidth usage queries (TimescaleDB)",
+    ),
+    RouterEntry(
+        module_path="dotmac.isp.subscribers.router",
+        router_name="router",
+        prefix="/subscribers",
+        tags=("Subscribers",),
+        scope=ServiceScope.ISP,
+        requires_auth=True,
+        description="Subscriber management - CRUD, activation, status, and password management",
     ),
     RouterEntry(
         module_path="dotmac.platform.access.router",
@@ -1183,6 +1216,7 @@ def register_routers_for_scope(
     routers = get_routers_for_scope(scope, include_shared)
     registered = 0
     failed = 0
+    seen: set[tuple[str, str, str]] = set()
 
     def _combine_prefixes(*parts: str) -> str:
         combined = ""
@@ -1205,8 +1239,21 @@ def register_routers_for_scope(
                 dependencies = [Depends(auth_dependency)]
 
             # Build full prefix: default base prefix + entry-specific base prefix + router prefix
-            base_prefix = entry.base_prefix or default_base_prefix
+            # Note: entry.base_prefix="" explicitly means no base prefix (different from None)
+            base_prefix = entry.base_prefix if entry.base_prefix is not None else default_base_prefix
             full_prefix = _combine_prefixes(prefix, base_prefix, entry.prefix)
+
+            # Skip duplicate registrations of the same router+prefix in this call
+            dedupe_key = (entry.module_path, entry.router_name, full_prefix)
+            if dedupe_key in seen:
+                logger.warning(
+                    "router.duplicate_skipped",
+                    router=entry.router_name,
+                    prefix=full_prefix,
+                    scope=scope.value,
+                )
+                continue
+            seen.add(dedupe_key)
 
             # Register the router
             app.include_router(
